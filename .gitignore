@@ -9,5 +9,9 @@ wheels/
 # Chroma DB
 tmp/
 
+
+# Text files
+textFiles/
+
 # Virtual environments
 .venv
