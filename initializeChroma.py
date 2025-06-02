@@ -47,44 +47,78 @@ def process_pdf(pdf_path: str, chunk_size: int = 1000) -> List[Dict[str, Any]]:
     current_size = 0
     current_page = 1
     
-    with open(pdf_path, 'rb') as file:
-        reader = PyPDF2.PdfReader(file)
-        
-        for page_num, page in enumerate(reader.pages, 1):
-            text = page.extract_text()
-            sentences = re.split(r'(?<=[.!?])\s+', text)
-            
-            for sentence in sentences:
-                sentence = sentence.strip()
-                if not sentence:
-                    continue
+    try:
+        with open(pdf_path, 'rb') as file:
+            try:
+                reader = PyPDF2.PdfReader(file)
                 
-                sentence_size = len(sentence)
+                # Validate PDF structure
+                if not reader.pages:
+                    logger.error(f"PDF file {pdf_path} has no pages")
+                    return []
                 
-                if current_size + sentence_size > chunk_size and current_chunk:
+                for page_num, page in enumerate(reader.pages, 1):
+                    try:
+                        text = page.extract_text()
+                        if not text:
+                            logger.warning(f"No text extracted from page {page_num} in {pdf_path}")
+                            continue
+                            
+                        sentences = re.split(r'(?<=[.!?])\s+', text)
+                        
+                        for sentence in sentences:
+                            sentence = sentence.strip()
+                            if not sentence:
+                                continue
+                            
+                            sentence_size = len(sentence)
+                            
+                            if current_size + sentence_size > chunk_size and current_chunk:
+                                chunks.append({
+                                    'text': ' '.join(current_chunk),
+                                    'page': current_page
+                                })
+                                current_chunk = []
+                                current_size = 0
+                            
+                            current_chunk.append(sentence)
+                            current_size += sentence_size
+                            current_page = page_num
+                        
+                        # Add page number to the last chunk of the page
+                        if current_chunk:
+                            current_chunk[-1] = f"{current_chunk[-1]}"
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing page {page_num} in {pdf_path}: {str(e)}")
+                        continue
+                
+                # Add any remaining text as the final chunk
+                if current_chunk:
                     chunks.append({
                         'text': ' '.join(current_chunk),
                         'page': current_page
                     })
-                    current_chunk = []
-                    current_size = 0
                 
-                current_chunk.append(sentence)
-                current_size += sentence_size
-                current_page = page_num
-            
-            # Add page number to the last chunk of the page
-            if current_chunk:
-                current_chunk[-1] = f"{current_chunk[-1]}"
-    
-    # Add any remaining text as the final chunk
-    if current_chunk:
-        chunks.append({
-            'text': ' '.join(current_chunk),
-            'page': current_page
-        })
-    
-    return chunks
+                if not chunks:
+                    logger.error(f"No valid text chunks extracted from {pdf_path}")
+                    return []
+                    
+                return chunks
+                
+            except PyPDF2.PdfReadError as e:
+                logger.error(f"Error reading PDF {pdf_path}: {str(e)}")
+                return []
+            except Exception as e:
+                logger.error(f"Unexpected error processing PDF {pdf_path}: {str(e)}")
+                return []
+                
+    except FileNotFoundError:
+        logger.error(f"PDF file not found: {pdf_path}")
+        return []
+    except Exception as e:
+        logger.error(f"Error opening PDF file {pdf_path}: {str(e)}")
+        return []
 
 
 class ChromaStore:
@@ -118,8 +152,36 @@ class ChromaStore:
             logger.error(f"Error creating collection {name}: {str(e)}")
             return None
 
+    def collection_exists(self, name: str) -> bool:
+        """Check if a collection exists."""
+        try:
+            # Create a new client for this collection
+            client = ChromaDb(
+                collection=name,
+                path="tmp/chromadb",
+                persistent_client=True,
+                embedder=embedder
+            )
+            # Try to get the collection and check if it has any documents
+            collection = client.client.get_collection(name=name)
+            collection_data = collection.get(include=["documents"])
+            existing_documents = collection_data.get("documents", [])
+            
+            if existing_documents:
+                logger.info(f"Collection {name} exists with {len(existing_documents)} documents")
+                return True
+            logger.info(f"Collection {name} exists but is empty")
+            return False
+        except Exception as e:
+            logger.info(f"Collection {name} does not exist: {str(e)}")
+            return False
+
     def get_collection(self, name: str):
         """Get an existing collection."""
+        if not self.collection_exists(name):
+            logger.info(f"Collection {name} does not exist, returning None")
+            return None
+            
         try:
             return ChromaDb(
                 collection=name,
@@ -188,6 +250,12 @@ def initialize_books():
         try:
             book_name = os.path.splitext(pdf_file)[0]
             pdf_path = f"textFiles/raw/{pdf_file}"
+            
+            # Check if collection already exists
+            if chroma_store.collection_exists(book_name):
+                logger.info(f"Collection {book_name} already exists and has content, skipping...")
+                continue
+                
             logger.info(f"Processing {pdf_file}...")
 
             chunks = process_pdf(pdf_path)
